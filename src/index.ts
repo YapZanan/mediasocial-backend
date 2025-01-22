@@ -2,13 +2,13 @@ import { neon } from "@neondatabase/serverless";
 import { drizzle } from "drizzle-orm/neon-http";
 import { Context, Hono } from "hono";
 import { channels, videos, VideoStatistics, videoStatistics } from "./db/schema";
-import { eq, sql } from 'drizzle-orm';
+import { eq, inArray, sql, and, ilike, desc } from 'drizzle-orm';
 import { cors } from "hono/cors";
 import { App } from './types';
 import pLimit from 'p-limit';
 
 const app = new Hono<App>();
-app.use('/', cors());
+app.use('/*', cors());
 
 // Quota costs for YouTube API operations
 const QUOTA_COSTS = {
@@ -19,15 +19,10 @@ const QUOTA_COSTS = {
 };
 
 let totalQuotaUsed = 0;
-// const MAX_QUOTA = 10000; // Example quota limit
 
 // Track quota usage and enforce limits
 function trackQuotaUsage(cost: number, endpoint: string) {
   totalQuotaUsed += cost;
-  // if (totalQuotaUsed > MAX_QUOTA) {
-  //   throw new Error('Quota limit exceeded');
-  // }
-  // console.log(`Quota used: ${cost} for ${endpoint}. Total quota used: ${totalQuotaUsed}`);
 }
 
 // Reusable database client
@@ -68,7 +63,15 @@ async function getPlaylistVideos(apiKey: string, playlistId: string): Promise<Vi
 async function getChannelDetailsFromDB(channelId: string, c: Context): Promise<ChannelDetails | null> {
   const db = getDbClient(c);
   const existingChannel = await db.select().from(channels).where(eq(channels.id, channelId)).limit(1).execute().then(rows => rows[0]);
-  return existingChannel ? { uploads: existingChannel.channelUploadID, id: existingChannel.id, customName: existingChannel.channelName, thumbnailHighUrl: existingChannel.thumbnail } : null;
+  return existingChannel ? {
+    uploads: existingChannel.channelUploadID,
+    id: existingChannel.id,
+    customName: existingChannel.channelName,
+    followersCount: existingChannel.followersCount,
+    viewsCount: existingChannel.viewsCount,
+    videoCount: existingChannel.videoCount,
+    thumbnailHighUrl: existingChannel.thumbnail
+  } : null;
 }
 
 // Fetch channel details from YouTube API
@@ -85,11 +88,14 @@ async function getUploadsChannelDetail(apiKey: string, username: string, c: Cont
       uploads: data.items[0].contentDetails.relatedPlaylists.uploads || null,
       customName: data.items[0].snippet.customUrl || null,
       id: data.items[0].id || null,
+      followersCount: Number(data.items[0].statistics.subscriberCount) || null,
+      viewsCount: Number(data.items[0].statistics.viewCount) || null,
+      videoCount: Number(data.items[0].statistics.videoCount) || null,
       thumbnailHighUrl: data.items[0].snippet.thumbnails.high.url || null,
-    } : { uploads: null, id: null, customName: null, thumbnailHighUrl: null };
+    } : { uploads: null, id: null, customName: null, followersCount: null, videoCount: null, viewsCount: null, thumbnailHighUrl: null };
   } catch (error) {
     console.error('Error fetching uploads channel ID:', { error });
-    return { uploads: null, id: null, customName: null, thumbnailHighUrl: null };
+    return { uploads: null, id: null, customName: null, followersCount: null, videoCount: null, viewsCount: null, thumbnailHighUrl: null };
   }
 }
 
@@ -157,13 +163,18 @@ async function refreshAllChannelDetails(apiKey: string, c: Context): Promise<{ i
   return allChannels;
 }
 
+
+
 // Insert or update a channel in the database
-const insertChannel = async (channelId: string, channelThumbnail: string, channelUpload: string, channelName: string, c: Context) => {
+const insertChannel = async (channelId: string, channelThumbnail: string, channelUpload: string, followers_count: number, views_count: number, video_count: number, channelName: string, c: Context) => {
   const db = getDbClient(c);
   const newChannel = await db.insert(channels).values({
     id: channelId,
     thumbnail: channelThumbnail,
     channelUploadID: channelUpload,
+    followersCount: followers_count,
+    videoCount: video_count,
+    viewsCount: views_count,
     channelName: channelName,
   }).onConflictDoUpdate({
     target: channels.id,
@@ -201,17 +212,477 @@ async function insertVideos(videoDetails: VideoDetails[], channelId: string, c: 
 }
 
 // Insert video statistics in the database
-async function insertVideoStatistics(videoStats: VideoStatistics[], c: Context): Promise<void> {
+async function insertVideoStatistics(videoStats: VideoStatistics[], c: Context): Promise<number> {
   const db = getDbClient(c);
-  await db.insert(videoStatistics).values(videoStats.map(stat => ({
-    videoId: stat.videoId,
-    statistics: stat.statistics,
-    recordedAt: sql`CURRENT_TIMESTAMP`,
-  }))).execute();
+  try {
+    // Insert video statistics into the database
+    const result = await db
+      .insert(videoStatistics)
+      .values(
+        videoStats.map(stat => ({
+          videoId: stat.videoId,
+          statistics: stat.statistics,
+          recordedAt: sql`CURRENT_TIMESTAMP`,
+        }))
+      )
+      .execute();
+
+    // Return the number of inserted records
+    return videoStats.length; // Fallback to the length of the input array
+  } catch (error) {
+    console.error('Error inserting video statistics:', error);
+    throw error;
+  }
 }
 
-// Routes
-app.get('/refresh-all-channels', async (c) => {
+// RESTful Routes
+
+// Get all channels
+app.get('/channels', async (c) => {
+  try {
+    const db = getDbClient(c);
+    const allChannels = await db.select().from(channels).execute();
+    const response: Channel[] = allChannels.map(channel => ({
+      id: channel.id,
+      channelName: channel.channelName,
+      thumbnail: channel.thumbnail,
+      channelUploadID: channel.channelUploadID,
+      createdAt: channel.createdAt,
+      updatedAt: channel.updatedAt,
+    }));
+    return c.json({
+      status: '200 OK',
+      data: response,
+    }, 200);
+  } catch (error) {
+    console.error('Error fetching channels:', { error });
+    return c.json({
+      status: '500 Internal Server Error',
+      message: 'An error occurred while fetching channels.',
+    }, 500);
+  }
+});
+
+app.get('/channels/:id', async (c) => {
+  try {
+    const db = getDbClient(c);
+    const channelId = c.req.param('id');
+
+    if (!channelId) {
+      return c.json({
+        status: '400 Bad Request',
+        message: 'channelId is required.',
+      }, 400);
+    }
+
+    // Check if the channel exists
+    const channel = await db.select().from(channels).where(eq(channels.id, channelId)).execute();
+
+    if (channel.length === 0) {
+      return c.json({
+        status: '404 Not Found',
+        message: 'Channel not found.',
+      }, 404);
+    }
+
+    const allVideos = await db.select().from(videos).where(eq(videos.channelId, channelId)).execute();
+    const videoIds = allVideos.map(video => video.id);
+    const allVideoStatistics = await db
+      .select()
+      .from(videoStatistics)
+      .where(inArray(videoStatistics.videoId, videoIds))
+      .execute();
+
+    const videosWithStatistics = allVideos.map(video => {
+      const statistics = allVideoStatistics.filter(stat => stat.videoId === video.id);
+      return {
+        ...video,
+        statistics: statistics,
+      };
+    });
+
+    const response: VideoWithStatistics[] = videosWithStatistics.map(video => ({
+      id: video.id,
+      channelId: video.channelId,
+      title: video.title,
+      url: video.url,
+      thumbnailUrl: video.thumbnailUrl,
+      createdAt: video.createdAt,
+      updatedAt: video.updatedAt,
+      statistics: video.statistics.map(stat => ({
+        id: stat.id,
+        videoId: stat.videoId,
+        statistics: stat.statistics as Record<string, unknown>,
+        recordedAt: stat.recordedAt,
+      })),
+    }));
+
+    return c.json({
+      status: '200 OK',
+      data: response,
+    }, 200);
+  } catch (error) {
+    console.error('Error fetching videos with statistics:', { error });
+    return c.json({
+      status: '500 Internal Server Error',
+      message: 'An error occurred while fetching videos with statistics.',
+    }, 500);
+  }
+});
+
+app.get('/statistics', async (c) => {
+  try {
+    // Check if the data is already cached in KV
+    const cachedData = await c.env.youtube_cache.get('channelStatistics', 'json');
+
+    if (cachedData) {
+      // Return the cached data if it exists
+      return c.json({
+        status: '200 OK',
+        data: cachedData,
+        source: 'cache',
+      });
+    }
+
+    const db = getDbClient(c);
+
+    // Fetch all channels, videos, and statistics in a single query using joins
+    const allData = await db
+      .select({
+        channelId: channels.id,
+        channelName: channels.channelName,
+        followersCount: channels.followersCount, // Include followersCount
+        viewsCount: channels.viewsCount, // Include viewsCount
+        videoId: videos.id,
+        statistics: videoStatistics.statistics,
+      })
+      .from(channels)
+      .leftJoin(videos, eq(videos.channelId, channels.id))
+      .leftJoin(videoStatistics, eq(videoStatistics.videoId, videos.id))
+      .execute();
+
+    // Aggregate statistics by channel
+    const channelStatisticsMap = new Map();
+
+    allData.forEach((row) => {
+      if (!row.channelId) return; // Skip rows without a channel
+
+      if (!channelStatisticsMap.has(row.channelId)) {
+        channelStatisticsMap.set(row.channelId, {
+          channelId: row.channelId,
+          channelName: row.channelName,
+          followersCount: row.followersCount, // Pass followersCount directly
+          viewsCount: row.viewsCount, // Pass viewsCount directly
+          totalLikes: 0,
+          totalComments: 0,
+        });
+      }
+
+      const channelStats = channelStatisticsMap.get(row.channelId);
+
+      if (row.statistics) {
+        const stats = row.statistics as {
+          likeCount: string;
+          commentCount: string;
+        };
+
+        // Aggregate likes and comments
+        channelStats.totalLikes += parseInt(stats.likeCount) || 0;
+        channelStats.totalComments += parseInt(stats.commentCount) || 0;
+      }
+    });
+
+    // Convert the map to an array
+    const channelStatistics = Array.from(channelStatisticsMap.values());
+
+    // Cache the data in KV
+    await c.env.youtube_cache.put('channelStatistics', JSON.stringify(channelStatistics), {
+      expirationTtl: 3600, // 1 hour in seconds
+    });
+
+    // Return the response
+    return c.json({
+      status: '200 OK',
+      data: channelStatistics,
+      source: 'database',
+    });
+  } catch (error) {
+    console.error('Error fetching channel statistics:', { error });
+    return c.json(
+      {
+        status: '500 Internal Server Error',
+        message: 'An error occurred while fetching channel statistics.',
+      },
+      500
+    );
+  }
+});
+
+// Get a specific channel by ID
+app.get('/channels/get/:id', async (c) => {
+  try {
+    const db = getDbClient(c);
+    const channelId = c.req.param('id');
+
+    if (!channelId) {
+      return c.json({
+        status: '400 Bad Request',
+        message: 'channelId is required.',
+      }, 400);
+    }
+
+    // Check if the channel exists
+    const channel = await db.select().from(channels).where(eq(channels.id, channelId)).execute();
+
+    if (channel.length === 0) {
+      return c.json({
+        status: '404 Not Found',
+        message: 'Channel not found.',
+      }, 404);
+    }
+
+    const allVideos = await db.select().from(videos).where(eq(videos.channelId, channelId)).execute();
+    const videoIds = allVideos.map(video => video.id);
+    const allVideoStatistics = await db
+      .select()
+      .from(videoStatistics)
+      .where(inArray(videoStatistics.videoId, videoIds))
+      .execute();
+
+    const videosWithStatistics = allVideos.map(video => {
+      const statistics = allVideoStatistics.filter(stat => stat.videoId === video.id);
+      return {
+        ...video,
+        statistics: statistics,
+      };
+    });
+
+    const response: VideoWithStatistics[] = videosWithStatistics.map(video => ({
+      id: video.id,
+      channelId: video.channelId,
+      title: video.title,
+      url: video.url,
+      thumbnailUrl: video.thumbnailUrl,
+      createdAt: video.createdAt,
+      updatedAt: video.updatedAt,
+      statistics: video.statistics.map(stat => ({
+        id: stat.id,
+        videoId: stat.videoId,
+        statistics: stat.statistics as Record<string, unknown>,
+        recordedAt: stat.recordedAt,
+      })),
+    }));
+
+    return c.json({
+      status: '200 OK',
+      data: response,
+    }, 200);
+  } catch (error) {
+    console.error('Error fetching videos with statistics:', { error });
+    return c.json({
+      status: '500 Internal Server Error',
+      message: 'An error occurred while fetching videos with statistics.',
+    }, 500);
+  }
+});
+
+// Get all videos for a specific channel
+app.get('/channels/:id/videos', async (c) => {
+  try {
+    const db = getDbClient(c);
+    const channelId = c.req.param('id');
+
+    if (!channelId) {
+      return c.json({
+        status: '400 Bad Request',
+        message: 'channelId is required.',
+      }, 400);
+    }
+
+    const allVideos = await db.select().from(videos).where(eq(videos.channelId, channelId)).execute();
+    const response: Video[] = allVideos.map(video => ({
+      id: video.id,
+      channelId: video.channelId,
+      title: video.title,
+      url: video.url,
+      thumbnailUrl: video.thumbnailUrl,
+      createdAt: video.createdAt,
+      updatedAt: video.updatedAt,
+    }));
+
+    return c.json({
+      status: '200 OK',
+      data: response,
+    }, 200);
+  } catch (error) {
+    console.error('Error fetching videos:', { error });
+    return c.json({
+      status: '500 Internal Server Error',
+      message: 'An error occurred while fetching videos.',
+    }, 500);
+  }
+});
+
+// Get video statistics for specific video IDs
+app.get('/videos/statistics', async (c) => {
+  try {
+    const db = getDbClient(c);
+    const videoIds = c.req.query('videoIds');
+
+    if (!videoIds) {
+      return c.json({
+        status: '400 Bad Request',
+        message: 'videoIds is required (comma-separated).',
+      }, 400);
+    }
+
+    const videoIdsArray = videoIds.split(',');
+    const allVideoStatistics = await db
+      .select()
+      .from(videoStatistics)
+      .where(inArray(videoStatistics.videoId, videoIdsArray))
+      .execute();
+
+    const response: VideoStatistics[] = allVideoStatistics.map(stat => ({
+      id: stat.id,
+      videoId: stat.videoId,
+      statistics: stat.statistics,
+      recordedAt: stat.recordedAt,
+    }));
+
+    return c.json({
+      status: '200 OK',
+      data: response,
+    }, 200);
+  } catch (error) {
+    console.error('Error fetching video statistics:', { error });
+    return c.json({
+      status: '500 Internal Server Error',
+      message: 'An error occurred while fetching video statistics.',
+    }, 500);
+  }
+});
+
+// Get all data (channels, videos, and video statistics)
+app.get('/all-data', async (c) => {
+  try {
+    const db = getDbClient(c);
+    const allChannels = await db.select().from(channels).execute();
+    const allVideos = await db.select().from(videos).execute();
+    const allVideoStatistics = await db
+      .select()
+      .from(videoStatistics)
+      .execute();
+
+    const response: AllDataResponse = {
+      channels: allChannels.map(channel => ({
+        id: channel.id,
+        channelName: channel.channelName,
+        thumbnail: channel.thumbnail,
+        channelUploadID: channel.channelUploadID,
+        createdAt: channel.createdAt,
+        updatedAt: channel.updatedAt,
+      })),
+      videos: allVideos.map(video => ({
+        id: video.id,
+        channelId: video.channelId,
+        title: video.title,
+        url: video.url,
+        thumbnailUrl: video.thumbnailUrl,
+        createdAt: video.createdAt,
+        updatedAt: video.updatedAt,
+      })),
+      videoStatistics: allVideoStatistics.map(stat => ({
+        id: stat.id,
+        videoId: stat.videoId,
+        statistics: stat.statistics as Record<string, unknown>,
+        recordedAt: stat.recordedAt,
+      })),
+    };
+
+    return c.json({
+      status: '200 OK',
+      data: response,
+    }, 200);
+  } catch (error) {
+    console.error('Error fetching all data:', { error });
+    return c.json({
+      status: '500 Internal Server Error',
+      message: 'An error occurred while fetching all data.',
+    }, 500);
+  }
+});
+
+
+app.get('/all-video', async (c) => {
+  try {
+    const db = getDbClient(c);
+
+    // Extract query parameters for pagination
+    const pageQuery = c.req.query('page');
+    const limitQuery = c.req.query('limit');
+
+    // Provide default values if query parameters are undefined
+    const page = pageQuery ? parseInt(pageQuery) : 1; // Default to page 1
+    const limit = limitQuery ? parseInt(limitQuery) : 10; // Default to 10 items per page
+    const offset = (page - 1) * limit; // Calculate the offset
+
+    // Fetch paginated videos from the database
+    const allVideos = await db
+      .select()
+      .from(videos)
+      .limit(limit)
+      .offset(offset)
+      .execute();
+
+    // Count total number of videos for pagination metadata
+    const totalVideos = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(videos)
+      .execute();
+    const totalCount = totalVideos[0]?.count || 0;
+
+    // Construct the response
+    const response: AllVideoResponse = {
+      videos: allVideos.map((video) => ({
+        id: video.id,
+        channelId: video.channelId,
+        title: video.title,
+        url: video.url,
+        thumbnailUrl: video.thumbnailUrl,
+        createdAt: video.createdAt,
+        updatedAt: video.updatedAt,
+      })),
+      pagination: {
+        page,
+        limit,
+        total: totalCount,
+        totalPages: Math.ceil(totalCount / limit),
+      },
+    };
+
+    return c.json(
+      {
+        status: '200 OK',
+        data: response,
+      },
+      200
+    );
+  } catch (error) {
+    console.error('Error fetching all data:', { error });
+    return c.json(
+      {
+        status: '500 Internal Server Error',
+        message: 'An error occurred while fetching all data.',
+      },
+      500
+    );
+  }
+});
+
+
+// Refresh all channels
+app.post('/channels/refresh', async (c) => {
   totalQuotaUsed = 0;
   const startTime = Date.now();
   try {
@@ -236,6 +707,310 @@ app.get('/refresh-all-channels', async (c) => {
   }
 });
 
+
+// Get top 5 most viewed videos
+app.get('/videos/top-views', async (c) => {
+  try {
+    const db = getDbClient(c);
+
+    // Get the limit from query params, default to 5 if not provided
+    const limit = parseInt(c.req.query('limit') || '5', 10);
+
+    // Subquery to get the latest video statistics for each video
+    const latestVideoStatistics = db
+      .select({
+        videoId: videoStatistics.videoId,
+        latestRecordedAt: sql`MAX(${videoStatistics.recordedAt})`.as('latestRecordedAt'),
+      })
+      .from(videoStatistics)
+      .groupBy(videoStatistics.videoId)
+      .as('latestVideoStatistics');
+
+    // Main query to get the top viewed videos
+    const topViewedVideos = await db
+      .select({
+        videoId: videos.id,
+        channelName: channels.channelName, // Include channelName
+        title: videos.title,
+        views: sql<number>`COALESCE(CAST(${videoStatistics.statistics}->>'viewCount' AS INTEGER), 0)`.as('views'),
+      })
+      .from(videos)
+      .leftJoin(videoStatistics, eq(videos.id, videoStatistics.videoId))
+      .leftJoin(
+        latestVideoStatistics,
+        and(
+          eq(videoStatistics.videoId, latestVideoStatistics.videoId),
+          eq(videoStatistics.recordedAt, latestVideoStatistics.latestRecordedAt)
+        )
+      )
+      .leftJoin(channels, eq(videos.channelId, channels.id)) // Join the channels table
+      .where(and(
+        eq(videoStatistics.videoId, latestVideoStatistics.videoId),
+        eq(videoStatistics.recordedAt, latestVideoStatistics.latestRecordedAt)
+      ))
+      .orderBy(sql`views DESC`)
+      .limit(limit) // Use the dynamic limit
+      .execute();
+
+    return c.json({
+      status: '200 OK',
+      data: topViewedVideos,
+    }, 200);
+  } catch (error) {
+    console.error('Error fetching top viewed videos:', { error });
+    return c.json({
+      status: '500 Internal Server Error',
+      message: 'An error occurred while fetching top viewed videos.',
+    }, 500);
+  }
+});
+
+// Get top 5 most liked videos
+app.get('/videos/top-likes', async (c) => {
+  try {
+    const db = getDbClient(c);
+
+    // Get the limit from query params, default to 5 if not provided
+    const limit = parseInt(c.req.query('limit') || '5', 10);
+
+    // Subquery to get the latest video statistics for each video
+    const latestVideoStatistics = db
+      .select({
+        videoId: videoStatistics.videoId,
+        latestRecordedAt: sql`MAX(${videoStatistics.recordedAt})`.as('latestRecordedAt'),
+      })
+      .from(videoStatistics)
+      .groupBy(videoStatistics.videoId)
+      .as('latestVideoStatistics');
+
+    // Main query to get the top liked videos
+    const topLikedVideos = await db
+      .select({
+        videoId: videos.id,
+        channelName: channels.channelName, // Include channelName
+        title: videos.title,
+        likes: sql<number>`COALESCE(CAST(${videoStatistics.statistics}->>'likeCount' AS INTEGER), 0)`.as('likes'),
+      })
+      .from(videos)
+      .leftJoin(videoStatistics, eq(videos.id, videoStatistics.videoId))
+      .leftJoin(
+        latestVideoStatistics,
+        and(
+          eq(videoStatistics.videoId, latestVideoStatistics.videoId),
+          eq(videoStatistics.recordedAt, latestVideoStatistics.latestRecordedAt)
+        )
+      )
+      .leftJoin(channels, eq(videos.channelId, channels.id)) // Join the channels table
+      .where(and(
+        eq(videoStatistics.videoId, latestVideoStatistics.videoId),
+        eq(videoStatistics.recordedAt, latestVideoStatistics.latestRecordedAt)
+      ))
+      .orderBy(sql`likes DESC`)
+      .limit(limit) // Use the dynamic limit
+      .execute();
+
+    return c.json({
+      status: '200 OK',
+      data: topLikedVideos,
+    }, 200);
+  } catch (error) {
+    console.error('Error fetching top liked videos:', { error });
+    return c.json({
+      status: '500 Internal Server Error',
+      message: 'An error occurred while fetching top liked videos.',
+    }, 500);
+  }
+});
+
+// Get top 5 most commented videos
+app.get('/videos/top-comments', async (c) => {
+  try {
+    const db = getDbClient(c);
+
+    // Get the limit from query params, default to 5 if not provided
+    const limit = parseInt(c.req.query('limit') || '5', 10);
+
+    // Subquery to get the latest video statistics for each video
+    const latestVideoStatistics = db
+      .select({
+        videoId: videoStatistics.videoId,
+        latestRecordedAt: sql`MAX(${videoStatistics.recordedAt})`.as('latestRecordedAt'),
+      })
+      .from(videoStatistics)
+      .groupBy(videoStatistics.videoId)
+      .as('latestVideoStatistics');
+
+    // Main query to get the top commented videos
+    const topCommentedVideos = await db
+      .select({
+        videoId: videos.id,
+        channelName: channels.channelName, // Include channelName
+        title: videos.title,
+        comments: sql<number>`COALESCE(CAST(${videoStatistics.statistics}->>'commentCount' AS INTEGER), 0)`.as('comments'),
+      })
+      .from(videos)
+      .leftJoin(videoStatistics, eq(videos.id, videoStatistics.videoId))
+      .leftJoin(
+        latestVideoStatistics,
+        and(
+          eq(videoStatistics.videoId, latestVideoStatistics.videoId),
+          eq(videoStatistics.recordedAt, latestVideoStatistics.latestRecordedAt)
+        )
+      )
+      .leftJoin(channels, eq(videos.channelId, channels.id)) // Join the channels table
+      .where(and(
+        eq(videoStatistics.videoId, latestVideoStatistics.videoId),
+        eq(videoStatistics.recordedAt, latestVideoStatistics.latestRecordedAt)
+      ))
+      .orderBy(sql`comments DESC`)
+      .limit(limit) // Use the dynamic limit
+      .execute();
+
+    return c.json({
+      status: '200 OK',
+      data: topCommentedVideos,
+    }, 200);
+  } catch (error) {
+    console.error('Error fetching top commented videos:', { error });
+    return c.json({
+      status: '500 Internal Server Error',
+      message: 'An error occurred while fetching top commented videos.',
+    }, 500);
+  }
+});
+
+// Get the top most viewed video from each channel
+app.get('/videos/top-channel-views', async (c) => {
+  try {
+    const db = getDbClient(c);
+
+    // Subquery to get the latest video statistics for each video
+    const latestVideoStatistics = db
+      .select({
+        videoId: videoStatistics.videoId,
+        latestRecordedAt: sql`MAX(${videoStatistics.recordedAt})`.as('latestRecordedAt'),
+      })
+      .from(videoStatistics)
+      .groupBy(videoStatistics.videoId)
+      .as('latestVideoStatistics');
+
+    // Main query to get the top viewed videos per channel
+    const topViewedVideosPerChannel = await db
+      .select({
+        channelId: videos.channelId,
+        channelName: channels.channelName, // Include channelName
+        videoId: videos.id,
+        title: videos.title,
+        views: sql<number>`COALESCE(CAST(${videoStatistics.statistics}->>'viewCount' AS INTEGER), 0)`.as('views'),
+      })
+      .from(videos)
+      .leftJoin(videoStatistics, eq(videos.id, videoStatistics.videoId))
+      .leftJoin(
+        latestVideoStatistics,
+        and(
+          eq(videoStatistics.videoId, latestVideoStatistics.videoId),
+          eq(videoStatistics.recordedAt, latestVideoStatistics.latestRecordedAt)
+        )
+      )
+      .leftJoin(channels, eq(videos.channelId, channels.id)) // Join the channels table
+      .where(and(
+        eq(videoStatistics.videoId, latestVideoStatistics.videoId),
+        eq(videoStatistics.recordedAt, latestVideoStatistics.latestRecordedAt)
+      ))
+      .orderBy(videos.channelId, sql`views DESC`)
+      .execute();
+
+    // Filter to get the top viewed video per channel
+    const uniqueTopViewedVideos = topViewedVideosPerChannel.reduce((acc, video) => {
+      if (!acc[video.channelId]) {
+        acc[video.channelId] = video;
+      }
+      return acc;
+    }, {} as Record<string, typeof topViewedVideosPerChannel[0]>);
+
+    return c.json({
+      status: '200 OK',
+      data: Object.values(uniqueTopViewedVideos),
+    }, 200);
+  } catch (error) {
+    console.error('Error fetching top viewed videos per channel:', { error });
+    return c.json({
+      status: '500 Internal Server Error',
+      message: 'An error occurred while fetching top viewed videos per channel.',
+    }, 500);
+  }
+});
+
+
+app.get('/videos/search', async (c) => {
+  try {
+    const db = getDbClient(c);
+
+    // Extract query parameters
+    const query = c.req.query('q'); // Search query
+    const pageQuery = c.req.query('page'); // Page number for pagination
+    const limitQuery = c.req.query('limit'); // Number of items per page
+
+    // Validate the search query
+    if (!query) {
+      return c.json(
+        {
+          status: '400 Bad Request',
+          message: 'Search query (q) is required.',
+        },
+        400
+      );
+    }
+
+    // Set default values for pagination
+    const page = pageQuery ? parseInt(pageQuery) : 1; // Default to page 1
+    const limit = limitQuery ? parseInt(limitQuery) : 10; // Default to 10 items per page
+    const offset = (page - 1) * limit; // Calculate the offset
+
+    // Search for videos whose titles match the query (case-insensitive)
+    const searchResults = await db
+      .select()
+      .from(videos)
+      .where(ilike(videos.title, `%${query}%`)) // Use ilike for case-insensitive search
+      .orderBy(desc(videos.updatedAt)) // Order by updatedAt in descending order (newest first)
+      .limit(limit)
+      .offset(offset)
+      .execute();
+
+    // Count total matching videos for pagination metadata
+    const totalResults = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(videos)
+      .where(ilike(videos.title, `%${query}%`))
+      .execute();
+    const totalCount = totalResults[0]?.count || 0;
+
+    // Construct the response
+    const response = {
+      status: '200 OK',
+      data: searchResults,
+      pagination: {
+        page,
+        limit,
+        total: totalCount,
+        totalPages: Math.ceil(totalCount / limit),
+      },
+    };
+
+    return c.json(response, 200);
+  } catch (error) {
+    console.error('Error searching videos:', { error });
+    return c.json(
+      {
+        status: '500 Internal Server Error',
+        message: 'An error occurred while searching videos.',
+      },
+      500
+    );
+  }
+});
+
+
 app.get('/', async (c) => {
   totalQuotaUsed = 0;
   try {
@@ -248,7 +1023,7 @@ app.get('/', async (c) => {
     if (!username) return c.text("Invalid input (either a YouTube URL or a username is required)", 400);
 
     const ChannelDetails = await getUploadsChannelDetail(apiKey, username, c);
-    if (!ChannelDetails?.id || !ChannelDetails.customName || !ChannelDetails?.thumbnailHighUrl || !ChannelDetails?.uploads) {
+    if (!ChannelDetails?.id || !ChannelDetails.customName || !ChannelDetails?.thumbnailHighUrl || !ChannelDetails?.uploads || !ChannelDetails?.followersCount || !ChannelDetails?.videoCount || !ChannelDetails?.viewsCount) {
       return c.text("Invalid input (either a YouTube URL or a username is required)", 400);
     }
 
@@ -258,9 +1033,12 @@ app.get('/', async (c) => {
     const videoIds = videos.map(video => video.videoId);
     const stats = await getVideoStatistics(apiKey, videoIds);
 
-    const channel = await insertChannel(ChannelDetails.id, ChannelDetails.thumbnailHighUrl, ChannelDetails.uploads, ChannelDetails.customName, c);
+    const channel = await insertChannel(ChannelDetails.id, ChannelDetails.thumbnailHighUrl, ChannelDetails.uploads, ChannelDetails.followersCount, ChannelDetails.viewsCount, ChannelDetails.videoCount, ChannelDetails.customName, c);
     await insertVideos(videos, ChannelDetails.id, c);
-    await insertVideoStatistics(stats, c);
+    const insertedVideoStatisticsCount = await insertVideoStatistics(stats, c);
+
+    // Invalidate the cache by deleting the `channelStatistics` key
+    await c.env.youtube_cache.delete('channelStatistics');
 
     const endTime = Date.now();
     const elapsedTime = endTime - startTime;
@@ -268,6 +1046,7 @@ app.get('/', async (c) => {
     return c.json({
       status: '200 OK',
       elapsedTime: `${elapsedTime}ms`,
+      insertedCount: insertedVideoStatisticsCount,
       quotaUsed: totalQuotaUsed,
       channel: channel,
       Date: Date.now(),

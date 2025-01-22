@@ -1,0 +1,82 @@
+{
+    "status": "200 OK",
+    "data": [
+        {
+            "channelId": "UC7_YxT-KID8kRbqZo7MyscQ",
+            "channelName": "@markiplier",
+            "totalLikes": 606798520,
+            "totalComments": 50933290,
+            "totalViews": 22188825539
+        },
+        {
+            "channelId": "UCX6OQ3DkcsbYNE6H8uQQuVA",
+            "channelName": "@mrbeast",
+            "totalLikes": 32327082023,
+            "totalComments": 479428952,
+            "totalViews": 1054765392946
+        },
+        {
+            "channelId": "UCDq5v10l4wkV5-ZBIJJFbzQ",
+            "channelName": "@ethanchlebowski",
+            "totalLikes": 47820713,
+            "totalComments": 2413915,
+            "totalViews": 1781482197
+        },
+        {
+            "channelId": "UCrorPql9QrqeSBNFNckfEcw",
+            "channelName": "@nadin.amizah",
+            "totalLikes": 7091983,
+            "totalComments": 258816,
+            "totalViews": 693600315
+        },
+        {
+            "channelId": "UCcdv38QxPjSMqbt5ffLhJLA",
+            "channelName": "@tailscale",
+            "totalLikes": 248305,
+            "totalComments": 19683,
+            "totalViews": 13242632
+        },
+        {
+            "channelId": "UCptAHlN1gdwD89tFM3ENb6w",
+            "channelName": "@prismadata",
+            "totalLikes": 448023,
+            "totalComments": 28650,
+            "totalViews": 28948292
+        },
+        {
+            "channelId": "UCQTGxzZT96e_tBP26SEotxw",
+            "channelName": "@bernadyavevo8426",
+            "totalLikes": 2162598,
+            "totalComments": 84472,
+            "totalViews": 618422912
+        },
+        {
+            "channelId": "UCpWyuFcKFJplt9aD7V4N4sQ",
+            "channelName": "@thelantisofficial",
+            "totalLikes": 809225,
+            "totalComments": 33015,
+            "totalViews": 149825761
+        },
+        {
+            "channelId": "UCtHaxi4GTYDpJgMSGy7AeSw",
+            "channelName": "@michaelreeves",
+            "totalLikes": 691309187,
+            "totalComments": 31520214,
+            "totalViews": 12722959673
+        },
+        {
+            "channelId": "UC9zMQvBN-47BP2ZMYQBt3xg",
+            "channelName": "@linustechtip",
+            "totalLikes": 56,
+            "totalComments": 20,
+            "totalViews": 3564
+        },
+        {
+            "channelId": "UCzgA9CBrIXPtkB2yNTTiy1w",
+            "channelName": "@level2jeff",
+            "totalLikes": 245684,
+            "totalComments": 18934,
+            "totalViews": 5947624
+        }
+    ]
+}

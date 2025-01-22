@@ -1,6 +1,6 @@
 name = "mediasocial-backend"
 compatibility_date = "2024-11-11"
-compatibility_flags = [ "nodejs_compat" ]
+compatibility_flags = ["nodejs_compat"]
 
 # [vars]
 # MY_VAR = "my-variable"
@@ -11,9 +11,9 @@ compatibility_flags = [ "nodejs_compat" ]
 [observability]
 enabled = true
 
-# [[kv_namespaces]]
-# binding = "MY_KV_NAMESPACE"
-# id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+[[kv_namespaces]]
+binding = "youtube_cache"
+id = "dba0ba62241f488e8d8089bab74fce9f"
 
 # [[r2_buckets]]
 # binding = "MY_BUCKET"

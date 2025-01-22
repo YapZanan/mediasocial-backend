@@ -1,11 +1,14 @@
 import { sql } from 'drizzle-orm';
-import { pgTable, text, timestamp, jsonb, uuid } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, jsonb, uuid, integer, bigint } from 'drizzle-orm/pg-core';
 
 export const channels = pgTable('channels', {
   id: text('youtube_id').unique().primaryKey(),
   channelName: text('channel_name').notNull().unique(),
   thumbnail: text('thumbnail_link').unique(),
   channelUploadID: text('channel_upload').notNull().unique(),
+  followersCount: bigint('followers_count', { mode: 'number' }).notNull().unique(),
+  viewsCount: bigint('views_count', { mode: 'number' }).notNull().unique(),
+  videoCount: integer('video_count').notNull().unique(),
   createdAt: timestamp('created_at').notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: timestamp('updated_at').notNull().default(sql`CURRENT_TIMESTAMP`),
 });
